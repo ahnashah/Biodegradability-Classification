@@ -1,0 +1,691 @@
+---
+title: 'MATP-4400 Final Project Notebook (2025)'
+subtitle: 'Predicting Biodegradability Challenge'
+author: "Ahna Shah"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    theme: united
+    toc: yes
+  html_document:
+    df_print: paged
+    header-includes: \usepackage{color}
+    toc: yes
+---
+
+```{r, include=FALSE, set.seed(20)}
+knitr::opts_chunk$set(cache = T)
+
+# Set the correct default repository
+r = getOption("repos")
+r["CRAN"] = "http://cran.rstudio.com"
+options(repos = r)
+
+
+# These will install required packages if they are not already installed
+if (!require("ggplot2")) {
+   install.packages("ggplot2")
+   library(ggplot2)
+}
+if (!require("knitr")) {
+   install.packages("knitr")
+   library(knitr)
+}
+
+if (!require("randomForest")) {
+   install.packages("randomForest", dependencies = TRUE)
+   library(randomForest)
+}
+
+if (!require("xtable")) {
+   install.packages("xtable")
+   library(xtable)
+}
+if (!require("pander")) {
+   install.packages("pander")
+   library(pander)
+}
+
+if (!require("devtools")) {
+  install.packages("devtools" ) 
+  library(devtools)
+}
+
+if (!require("usethis")) {
+  install.packages("usethis" ) 
+  library(usethis)
+}
+
+if (!require("e1071")) {
+ install.packages("e1071" ) 
+  library(e1071)
+}
+
+if (!require("pROC")){
+  install.packages("pROC")
+   library(pROC)
+} 
+
+if (!require("dplyr")) {
+   install.packages("dplyr")
+   library(dplyr)
+}
+
+if (!require("tidyverse")) {
+   install.packages("tidyverse")
+   library(tidyverse)
+}
+
+if (!require("glmnet")) {
+   install.packages("glmnet")
+   library(glmnet)
+}
+
+
+if (!require("caret")) {
+   install.packages("caret")
+   library(caret)
+}
+
+if (!require("formattable")) {
+   install.packages("formattable")
+   library(formattable)
+}
+
+if (!require(reshape2)){
+  install.packages("reshape2", dependencies = TRUE)
+   library(reshape2)
+} 
+if (!require(gridExtra)){
+  install.packages("gridExtra", dependencies = TRUE)
+   library(gridExtra)
+} 
+if (!require(MASS)){
+  install.packages("MASS", dependencies = TRUE)
+   library(MASS)
+} 
+
+if (!require(Boruta)){
+  install.packages("Boruta")
+   library(Boruta)
+} 
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Team Information
+
+* This report was prepared for **ChemsRUs** by  *Ahna Shah*,  *shaha12* 
+for the *JJBAR*
+* My team members are: *Jose Idrovo, Ronglin Chen, Beibei Xian, and Jericho Dizon *,  *idrovj, chenr16, xianb ,dizonj*
+* Our team used the following challenge: https://www.codabench.org/competitions/6042/
+
+# Introduction
+
+**Chems-R-Us** has created an entry to the challenge at https://Codabench.lisn.upsaclay.fr/competitions/3073 based on logistic regression (LR).  Their entry is in the file `FinalProjChemsRUs.Rmd`. Based on the information in the leaderboard under `bennek`, their entry is not performing feature selection well. The approach tried by Chems-R-Us was LR with feature selection based on the coefficients of logistic regression with p-values used to determine importance.   
+
+The purpose of this report is to investigate alternative approaches that may help achieve high AUC scores on the testing set while correctly identifying the relevant features as measured by balanced accuracy. 
+
+# Data Description Preparation:
+\tiny
+```{r}
+# Prepare biodegradability data 
+# get feature names 
+featurenames <- read.csv("~/MATP-4400/data/chems_feat.name.csv",
+                         header=FALSE, 
+                         colClasses = "character")
+
+# get training data and rename with feature names
+cdata.df <-read.csv("~/MATP-4400/data/chems_train.data.csv",
+                    header=FALSE)
+colnames(cdata.df) <- featurenames$V1
+
+# get external testing data and rename with feature names
+tdata.df <-read.csv("~/MATP-4400/data/chems_test.data.csv",
+                    header=FALSE) 
+
+colnames(tdata.df) <- featurenames$V1
+
+class <- read.csv("~/MATP-4400/data/chems_train.solution.csv",
+                  header=FALSE, 
+                  colClasses = "factor") 
+
+class <- class$V1
+```
+\tiny
+```{r}
+#ss will be the number of data points in the training set
+n <- nrow(cdata.df)
+ss <- ceiling(n*0.90)
+
+# Set random seed for reproducibility
+set.seed(300)
+train.perm <- sample(1:n,ss)
+
+#Split training and validation data
+train <- cdata.df %>% dplyr::slice(train.perm) 
+validation <- cdata.df %>% dplyr::slice(-train.perm) 
+```
+
+\tiny
+```{r}
+# Initialize the `scaler` on the training data
+#   method = "center" subtracts the mean of the predictor's data from the predictor values
+#   method = "scale" divides by the standard deviation.
+scaler <- preProcess(train, method = c("center", "scale")) 
+
+# Use the `scale` object to normalize our training data
+train <- predict(scaler, train) 
+#summary(train[,1:4])
+
+# Normalize validation data
+validation <- predict(scaler, validation) 
+
+# Normalize testing data
+test <- predict(scaler, tdata.df) 
+
+# Split the output classes
+classtrain <- class[train.perm]
+classval <-class[-train.perm]
+```
+
+The dataset consists of 1055 total data points with 168 features named X0 through X167. The output class labels, representing two categories—biodegradable and not biodegradable were loaded separately. After preparing the dataset, we divided it into a 90% training set (950 samples) and a 10% validation set (105 samples), setting seed(300) to ensure reproducibility of the random split. The external testing set was loaded independently for final evaluation. To prepare the data for modeling, we standardized all features to a common scale by centering them to have mean zero and scaling them to unit variance using the preProcess() function. This step was necessary because we do not have domain knowledge to prioritize specific features, and logistic regression assumes independent and identically distributed (IID) Gaussian features. Standardization ensures that no single feature disproportionately influences the model simply due to its numerical scale. Both the training and validation sets were standardized using the same transformation to maintain consistency.
+
+# Methods Used
+For classification, I implemented two distinct methods: logistic regression (LR) and linear discriminant analysis (LDA). I trained the logistic regression model using all features and used the predict() function to output class probability estimates. These probabilities provided a ranking of the points from least to most likely to be biodegradable, which I used to generate ROC curves and compute AUC values. I applied a threshold of 0.30 to the predicted probabilities to convert them into binary class predictions for calculating balanced accuracy. 
+
+For my second classification method, I fit an LDA model to the training data. LDA produces scalar projection scores (linear combinations of features) for each data point, which I used directly as rankings for ROC and AUC analysis. I applied a threshold of 0 to assign class labels for balanced accuracy computation.
+
+For feature selection, I used two methods: Lasso regression and Boruta. I applied Lasso by fitting a logistic regression with an L1 penalty (glmnet with alpha=1) and selected the features corresponding to nonzero coefficients at the best lambda value. I also used Boruta, a wrapper algorithm around random forests, to identify important features by comparing real features against randomized shadow features. I then retrained both the LR and LDA models using the features selected from each method to compare performance with and without feature selection.
+
+\tiny
+```{r, echo=TRUE}
+# This is a group of helper functions meant to avoid repetitiveness and shorten presentation output. The default threhold is 0.5.
+
+prob_to_class <- function(ranking_lr,threshold=0.30) {
+   temp <- ranking_lr > threshold
+   temp[temp==TRUE] <- 1
+   temp[temp==FALSE] <- -1 
+   return(as.factor(temp))
+}
+```
+
+\tiny
+```{r, warning=FALSE}
+# Fit LR model
+train.df <- cbind(train,classtrain)
+lrfit <- glm(classtrain~., data=train.df,
+             family = "binomial")
+
+# Predict training
+ranking_lr.train <- predict(lrfit,train,
+                            type="response") 
+classtrain_lr <- prob_to_class(ranking_lr.train)
+result_lr_train <- confusionMatrix(classtrain_lr, classtrain)
+BalancedAccuracyLRNoFS_train <- result_lr_train$byClass["Balanced Accuracy"]
+BalancedAccuracyLRNoFS_train
+
+# Predict validation
+ranking_lr.val <- predict(lrfit,validation,
+                          type="response") 
+classval_lr <- prob_to_class(ranking_lr.val)
+result<-confusionMatrix(classval_lr,classval)
+BalancedAccuracyLRNoFS <- result$byClass["Balanced Accuracy"]
+BalancedAccuracyLRNoFS
+```
+\tiny
+```{r}
+# Fit LDA model to training data
+ldafit <- lda(train, classtrain, prior=c(1,1)/2)
+
+# Predict on training data
+ranking_lda.train <- as.numeric(predict(ldafit, train)$x)
+classtrain_lda <- prob_to_class(ranking_lda.train, threshold=0)
+result_lda_train <- confusionMatrix(classtrain_lda, classtrain)
+BalancedAccuracyLDANoFS_train <- result_lda_train$byClass["Balanced Accuracy"]
+BalancedAccuracyLDANoFS_train
+
+# Predict on validation data
+ranking_lda.val <- as.numeric(predict(ldafit, validation)$x)
+classval_lda <- prob_to_class(ranking_lda.val, threshold=0)
+result_lda <- confusionMatrix(classval_lda, classval)
+BalancedAccuracyLDANoFS <- result_lda$byClass["Balanced Accuracy"]
+BalancedAccuracyLDANoFS
+```
+
+
+# Baseline Results Using All Features
+The ROC curves and evaluation metrics highlight several important points about model performance. Both Logistic Regression and LDA achieved strong results, with AUC values above 0.89. Logistic Regression performed better on the training set, reaching an AUC of 0.995 compared to LDA's 0.976. However, this advantage didn’t carry over to the validation set. The larger gap between Logistic Regression's training and validation results, about 0.1 in AUC and 0.1459 in balanced accuracy, suggests that it overfit the training data. In contrast, LDA showed more consistent behavior, with smaller gaps of 0.062 in AUC and 0.0718 in balanced accuracy between training and validation. LDA also had better validation performance overall, achieving a higher AUC (0.914 vs. 0.895) and better balanced accuracy (0.8442 vs. 0.8225) compared to Logistic Regression. For a baseline model without feature selection, both methods worked well, but LDA appeared to generalize better and would likely be the stronger choice moving forward.
+
+\tiny
+```{r}
+# For Logistic Regression
+roc_lr_train <- roc(as.factor(ifelse(classtrain == -1, "0", "1")), ranking_lr.train)
+roc_lr_val <- roc(as.factor(ifelse(classval == -1, "0", "1")), ranking_lr.val)
+
+auc_lr_train <- round(auc(roc_lr_train), 3)
+auc_lr_val <- round(auc(roc_lr_val), 3)
+
+# For LDA
+roc_lda_train <- roc(as.factor(ifelse(classtrain == -1, "0", "1")), ranking_lda.train)
+roc_lda_val <- roc(as.factor(ifelse(classval == -1, "0", "1")), ranking_lda.val)
+
+auc_lda_train <- round(auc(roc_lda_train), 3)
+auc_lda_val <- round(auc(roc_lda_val), 3)
+
+
+cat("Balanced Accuracy (Logistic Regression - Train):", round(BalancedAccuracyLRNoFS_train, 4), "\n")
+cat("Balanced Accuracy (Logistic Regression - Validation):", round(BalancedAccuracyLRNoFS, 4), "\n")
+cat("Balanced Accuracy (LDA - Train):", round(BalancedAccuracyLDANoFS_train, 4), "\n")
+cat("Balanced Accuracy (LDA - Validation):", round(BalancedAccuracyLDANoFS, 4), "\n")
+
+ggroc(list(
+  "LR Train" = roc_lr_train,
+  "LR Validation" = roc_lr_val,
+  "LDA Train" = roc_lda_train,
+  "LDA Validation" = roc_lda_val
+)) +
+  ggtitle("ROC Curves for Logistic Regression and LDA (No Feature Selection)") +
+  scale_color_discrete(name = "Model", labels = c(
+    paste0("LR Train (AUC: ", auc_lr_train, ")"),
+    paste0("LR Validation (AUC: ", auc_lr_val, ")"),
+    paste0("LDA Train (AUC: ", auc_lda_train, ")"),
+    paste0("LDA Validation (AUC: ", auc_lda_val, ")")
+  ))
+```
+
+
+# Results Using Feature Selection
+I used two different approaches: Lasso regression and Boruta. Lasso selected 17 important features by fitting a logistic regression with an L1 penalty and keeping features with nonzero coefficients. Boruta, a random forest-based method, selected 40 features by comparing real features against randomized shadow features.For Logistic Regression, feature selection made a big difference. The baseline model with all features achieved a validation AUC of 0.895 and balanced accuracy of 0.8225. Using Lasso improved the AUC to 0.9175, although balanced accuracy dropped slightly to 0.8028. With Boruta, the AUC jumped to 0.9545,the highest overall, and the balanced accuracy increased to 0.893 , suggesting that the threshold might need to be changed. LDA showed more stable behavior. The baseline LDA model had a validation AUC of 0.914 and balanced accuracy of 0.8442. Using Lasso kept performance strong with minimal drop, and using Boruta actually improved the AUC to 0.9469 without hurting balanced accuracy. Boruta clearly worked especially well with LDA. Overall, Logistic Regression was more sensitive to feature selection, while LDA remained stable across different feature sets. 
+
+
+Method 1: Boruta
+```{r}
+
+set.seed(111)
+train.df <- cbind(train, classtrain)
+
+# Run Boruta on training data
+boruta_train <- Boruta(classtrain ~ ., data = train.df, doTrace = 0, ntree = 5000)
+
+# See Boruta results
+print(boruta_train)
+```
+
+LDA on Boruta selected features
+```{r}
+# Get selected features
+boruta_fixed <- TentativeRoughFix(boruta_train)
+
+# Extract selected features
+selected_features_boruta <- getSelectedAttributes(boruta_fixed, withTentative = FALSE)
+# Subset train and validation using Boruta-selected features
+train_boruta <- dplyr::select(train, dplyr::all_of(selected_features_boruta))
+validation_boruta <- dplyr::select(validation, dplyr::all_of(selected_features_boruta))
+
+# Reattach class labels
+train_boruta.df <- cbind(train_boruta, classtrain)
+val_boruta.df <- cbind(validation_boruta, classval)
+
+# Build the formula
+boruta_formula <- as.formula(
+  paste("classtrain ~", paste(selected_features_boruta, collapse = " + "))
+)
+
+# Fit LDA model on Boruta-selected features
+ldafit_boruta <- lda(boruta_formula, data = train_boruta.df, prior = c(1, 1)/2)
+
+# Predict validation data
+ranking_lda_boruta.val <- as.numeric(predict(ldafit_boruta, validation_boruta)$x)
+
+# Convert predictions to class labels
+classval_lda_boruta <- prob_to_class(ranking_lda_boruta.val, threshold = 0)
+
+# Evaluate performance
+result_lda_boruta <- confusionMatrix(classval_lda_boruta, classval)
+BalancedAccuracyLDABoruta <- result_lda_boruta$byClass["Balanced Accuracy"]
+BalancedAccuracyLDABoruta
+```
+
+Logistic Regression on Boruta selected features
+\tiny
+```{r, echo=FALSE}
+# Use created train_boruta.df and val_boruta.df
+lrfit_boruta <- glm(classtrain ~ ., data = train_boruta.df, family = "binomial")
+
+# Predict validation probabilities
+ranking_lr_boruta.val <- predict(lrfit_boruta, newdata = validation_boruta, type = "response")
+
+# Convert to classes
+classval_lr_boruta <- prob_to_class(ranking_lr_boruta.val, threshold = 0.30)
+
+# Evaluate performance
+result_lr_boruta <- confusionMatrix(classval_lr_boruta, classval)
+BalancedAccuracyLRBoruta <- result_lr_boruta$byClass["Balanced Accuracy"]
+BalancedAccuracyLRBoruta
+```
+
+Method 2: Lasso
+```{r}
+y_train <- ifelse(classtrain == -1, 0, 1)
+y_val <- ifelse(classval == -1, 0, 1)
+
+x_train <- as.matrix(train)
+x_val <- as.matrix(validation)
+
+set.seed(300)
+cv_lasso <- cv.glmnet(x_train, y_train, 
+                      family = "binomial", 
+                      alpha = 1,              
+                      type.measure = "class")
+
+# View the best lambda
+best_lambda <- cv_lasso$lambda.min
+
+# Predict class probabilities
+ranking_lasso_val <- predict(cv_lasso, newx = x_val, s = best_lambda, type = "response")
+
+# Convert probabilities to classes using same helper function
+classval_lasso <- prob_to_class(ranking_lasso_val, threshold = 0.30)
+
+# Evaluate performance
+result_lasso <- confusionMatrix(classval_lasso, as.factor(classval))
+BalancedAccuracyLasso <- result_lasso$byClass["Balanced Accuracy"]
+BalancedAccuracyLasso
+
+
+```
+
+```{r}
+# Extract coefficients at the best lambda
+coef_matrix <- coef(cv_lasso, s = best_lambda)
+
+# Identify non-zero coefficients excluding the intercept
+nonzero_indices <- which(coef_matrix[-1, 1] != 0)  # exclude intercept
+significant_vars <- rownames(coef_matrix)[-1][nonzero_indices]
+
+# Use these variable names to select from original data
+train.fs <- dplyr::select(train, dplyr::all_of(significant_vars))
+val.fs <- dplyr::select(validation, dplyr::all_of(significant_vars))
+
+# Reattach class labels
+train.fs.df <- cbind(train.fs, classtrain)
+val.fs.df <- cbind(val.fs, classval)
+```
+
+Logistic Regression on Lasso Selected Features
+\tiny
+```{r, warning=FALSE}
+# Fit logistic regression using only selected features
+lrfit.fs <- glm(classtrain ~ ., data = train.fs.df, 
+                family = "binomial")
+
+# Predict training probabilities on selected features
+ranking_lr.fs.train <- predict(lrfit.fs, newdata = train.fs, 
+                               type = "response")
+
+# Predict validation probabilities on selected features
+ranking_lr.fs.val <- predict(lrfit.fs, newdata = val.fs, 
+                             type = "response")
+
+classval_lr.fs <- prob_to_class(ranking_lr.fs.val)
+result<-confusionMatrix(classval_lr,classval)
+confusion.matrix.result <- confusionMatrix(classval, classval_lr.fs)
+BalancedAccuracyLRFS <- confusion.matrix.result$byClass["Balanced Accuracy"]
+BalancedAccuracyLRFS
+```
+
+LDA on Logistic Regression Selected Features
+\tiny
+```{r, echo=FALSE}
+# Build formula from Lasso selected features
+lasso_formula <- as.formula(
+  paste("classtrain ~", paste(significant_vars, collapse = " + "))
+)
+
+# Fit LDA
+ldafit_lasso <- lda(lasso_formula, data = train.fs.df, prior = c(1, 1)/2)
+
+# Predict validation data
+ranking_lda_lasso.val <- as.numeric(predict(ldafit_lasso, val.fs)$x)
+
+# Convert to classes
+classval_lda_lasso <- prob_to_class(ranking_lda_lasso.val, threshold = 0)
+
+# Evaluate performance
+result_lda_lasso <- confusionMatrix(classval_lda_lasso, classval)
+BalancedAccuracyLDALasso <- result_lda_lasso$byClass["Balanced Accuracy"]
+BalancedAccuracyLDALasso
+```
+
+# Results Comparison
+```{r, warning=FALSE, message=FALSE, fig.height=5}
+library(knitr)
+
+# Make dataframe
+result.df <- data.frame(
+  Method = c(
+    "Logistic Regression (No FS)",
+    "Logistic Regression (Lasso FS)",
+    "Logistic Regression (Boruta FS)*",
+    "LDA (No FS)",
+    "LDA (Lasso FS)",
+    "LDA (Boruta FS)"
+  ),
+  RCS_ID = c(
+    "shaha12",
+    "shaha12",
+    "shaha12",  # <- * submission
+    "shaha12",
+    "shaha12",
+    "shaha12"
+  ),
+  numFeatures = c(
+    168,
+    length(significant_vars),           # number of Lasso features
+    length(selected_features_boruta),   # number of Boruta features
+    168,
+    length(significant_vars),
+    length(selected_features_boruta)
+  ),
+  valAUC = c(
+    auc_lr_val,
+    auc(roc(as.factor(ifelse(classval == -1, "0", "1")), ranking_lr.fs.val)),
+    auc(roc(as.factor(ifelse(classval == -1, "0", "1")), ranking_lr_boruta.val)),
+    auc_lda_val,
+    auc(roc(as.factor(ifelse(classval == -1, "0", "1")), ranking_lda_lasso.val)),
+    auc(roc(as.factor(ifelse(classval == -1, "0", "1")), ranking_lda_boruta.val))
+  ),
+  testAUC = c(
+    NA, 
+    NA,
+    "0.9143",
+    NA,
+    NA,
+    NA
+  ),
+  featureBalAcc = c(
+    BalancedAccuracyLRNoFS,
+    BalancedAccuracyLRFS,
+    "0.5992",
+    BalancedAccuracyLDANoFS,
+    BalancedAccuracyLDALasso,
+    BalancedAccuracyLDABoruta
+  )
+)
+
+# Print the table
+kable(result.df,
+      caption = "Summary of methods tried with results. Final challenge entry indicated by *.")
+
+```
+
+Plot
+```{r, warning=FALSE, message=FALSE, fig.height=5}
+# Prepare ROC data frame
+roc_class <- as.factor(ifelse(classval == -1, "0", "1"))
+
+roc.data <- data.frame(
+  Class = roc_class,
+  LR_No_Selection = as.numeric(ranking_lr.val),
+  LR_Lasso_FS = as.numeric(ranking_lr.fs.val),
+  LR_Boruta_FS = as.numeric(ranking_lr_boruta.val),
+  LDA_No_Selection = as.numeric(ranking_lda.val),
+  LDA_Lasso_FS = as.numeric(ranking_lda_lasso.val),
+  LDA_Boruta_FS = as.numeric(ranking_lda_boruta.val)
+)
+
+# Create ROC objects
+roc_lr_nofs <- roc(roc.data$Class, roc.data$LR_No_Selection)
+roc_lr_lasso <- roc(roc.data$Class, roc.data$LR_Lasso_FS)
+roc_lr_boruta <- roc(roc.data$Class, roc.data$LR_Boruta_FS)
+roc_lda_nofs <- roc(roc.data$Class, roc.data$LDA_No_Selection)
+roc_lda_lasso <- roc(roc.data$Class, roc.data$LDA_Lasso_FS)
+roc_lda_boruta <- roc(roc.data$Class, roc.data$LDA_Boruta_FS)
+
+# Calculate AUCs
+auc_lr_nofs <- round(auc(roc_lr_nofs), 3)
+auc_lr_lasso <- round(auc(roc_lr_lasso), 3)
+auc_lr_boruta <- round(auc(roc_lr_boruta), 3)
+auc_lda_nofs <- round(auc(roc_lda_nofs), 3)
+auc_lda_lasso <- round(auc(roc_lda_lasso), 3)
+auc_lda_boruta <- round(auc(roc_lda_boruta), 3)
+
+# Merge all roc objects into one list
+roc_list <- list(
+  "LR No FS" = roc_lr_nofs,
+  "LR Lasso FS" = roc_lr_lasso,
+  "LR Boruta FS" = roc_lr_boruta,
+  "LDA No FS" = roc_lda_nofs,
+  "LDA Lasso FS" = roc_lda_lasso,
+  "LDA Boruta FS" = roc_lda_boruta
+)
+
+# Plot them
+ggroc(roc_list) +
+  ggtitle("ROC Curves (Validation Set)", subtitle = "Comparison Across All Methods") +
+  scale_color_discrete(name = "Model", labels = c(
+    paste0("LR No FS (AUC: ", auc_lr_nofs, ")"),
+    paste0("LR Lasso FS (AUC: ", auc_lr_lasso, ")"),
+    paste0("LR Boruta FS (AUC: ", auc_lr_boruta, ")"),
+    paste0("LDA No FS (AUC: ", auc_lda_nofs, ")"),
+    paste0("LDA Lasso FS (AUC: ", auc_lda_lasso, ")"),
+    paste0("LDA Boruta FS (AUC: ", auc_lda_boruta, ")")
+  ))
+```
+Both Lasso and Boruta were useful for feature selection, but each had different strengths. With Lasso, I was able to reduce the feature set from 168 to just 17 features while maintaining or slightly improving performance, making it a simple and efficient choice for high-dimensional datasets. Boruta, while selecting a larger set of 40 features, achieved the highest AUC values for both classifiers, showing it was able to retain more predictive information. I found that LDA remained consistent across different feature sets, maintaining a balanced accuracy around 0.844. LDA with Boruta features matched the performance of the full-feature model, which highlights both LDA’s robustness and the effectiveness of Boruta’s selections. Logistic Regression was more sensitive to feature selection, with Boruta boosting AUC but lowering balanced accuracy to 0.599(on the challenge), suggesting that some threshold adjustment would be necessary. For the final challenge submission, I used Logistic Regression with Boruta-selected features because it achieved the best validation AUC (0.955) and a strong test AUC (0.914). Although the balanced accuracy was lower, the model’s strong ranking ability made it the best fit for the competition goals. Overall, I would recommend LDA with Boruta selection for real-world applications. It achieved both high AUC and top balanced accuracy, making it a strong, well-rounded choice when both ranking and classification accuracy are important, and less likely to overfit.
+
+
+# Analysis of Recommended Features
+```{r, warning=FALSE, message=FALSE, fig.height=5}
+# List of recommended features
+recommended_features <- selected_features_boruta
+
+# Print the recommended features
+cat("The features recommended by Boruta for biodegradability prediction are:\n")
+print(recommended_features)
+
+# Number of recommended features
+length(recommended_features)
+
+# Plot the Boruta feature importance scores
+plot(boruta_train, 
+     xlab = "", 
+     xaxt = "n", 
+     main = "Boruta Feature Importance Plot (Raw Importance Scores)")
+
+# Add labels nicely
+lz <- lapply(1:ncol(boruta_train$ImpHistory), function(i) boruta_train$ImpHistory[is.finite(boruta_train$ImpHistory[,i]),i])
+names(lz) <- colnames(boruta_train$ImpHistory)
+Labels <- sort(sapply(lz, median))
+axis(side = 1, las = 2, labels = names(Labels),
+     at = 1:length(Labels), cex.axis = 0.7)
+```
+The Boruta algorithm identified 40 features as important predictors of biodegradability. When I plotted the importance scores, a clear pattern emerged: a few features stood out with very high importance values (especially those above 80), suggesting strong relationships with biodegradation behavior. The distribution of scores looked like a hockey stick, most features had low importance (below 20), and then a sharp jump appeared for about 20–25 features. Even though Boruta flagged 40 features, it’s clear that a smaller subset carries most of the predictive power. For ChemsRUS, I would recommend focusing on the features with importance scores above 40, especially the highest-ranked ones like X93 and X84. Even without knowing their chemical names, these features are likely crucial for biodegradability.The strong separation between the top features and the rest validates the need for feature selection. Both Lasso and Boruta found meaningful sets, but Boruta offered the best balance between reducing dimensionality and maintaining performance, making it my recommended approach for this task.
+
+
+# Analysis of Features Not Recommended
+```{r, warning=FALSE, message=FALSE, fig.height=5}
+# List of NOT recommended features
+all_features <- colnames(train)
+nonrecommended_features <- setdiff(all_features, recommended_features)
+
+# Print non-recommended features
+cat("The features NOT recommended by Boruta are:\n")
+print(nonrecommended_features)
+
+# Number of non-recommended features
+length(nonrecommended_features)
+
+# Pick 5 random non-recommended features
+set.seed(123)
+sample_nonrec_feats <- sample(nonrecommended_features, 5)
+
+# Create a combined dataframe
+boxplot_data <- train[, sample_nonrec_feats]
+boxplot_data$Class <- classtrain
+
+# Melt the data for ggplot
+library(reshape2)
+boxplot_melted <- melt(boxplot_data, id.vars = "Class")
+
+# Plot
+ggplot(boxplot_melted, aes(x = Class, y = value, fill = Class)) +
+  geom_boxplot() +
+  facet_wrap(~ variable, scales = "free", ncol = 2) +
+  ggtitle("Boxplots of Non-Recommended Features by Class") +
+  xlab("Class (-1: Not Biodegradable, 1: Biodegradable)") +
+  theme_minimal()
+```
+The boxplots of the non-recommended features(5 randomly selected ones) clearly show why Boruta excluded these variables. Most of these features show little to no separation between biodegradable and non-biodegradable compounds, making them poor predictors. Looking at features like X42, X17, X68, X90, and X103, the distributions for both classes overlap heavily, with almost identical medians and spreads. Even features with some outliers, like X68 and X90, fail to show meaningful class separation. This strongly suggests that many of these features are either irrelevant or "fake features" that add noise rather than predictive power. For ChemsRUS, this analysis points to specific molecular properties that are unlikely to impact biodegradability and shouldn't be prioritized when designing new compounds. Instead, the company should focus on optimizing the key features previously identified as important. Overall, the stark contrast between recommended and non-recommended features validates the feature selection process and highlights the importance of using methods like Boruta in complex chemical datasets.
+
+# Challenge Prediction
+For my final challenge entry, I used Logistic Regression with Boruta for feature selection. I chose this combination because Boruta effectively identified the most important predictors, leading to a strong increase in AUC without overcomplicating the model. Logistic Regression paired with Boruta-selected features achieved the highest validation AUC (0.955) and strong test performance (AUC 0.914). Since the challenge prioritized ranking quality, this approach offered the best trade-off between simplicity, interpretability, and predictive strength.
+
+
+Insert your codes to create the prediction and files to enter the challenge here.   Feel free to break them up into multiple code blocks. 
+\tiny
+```{r}
+# 1. First, subset the test set to Boruta-selected features
+test_boruta <- dplyr::select(test, dplyr::all_of(selected_features_boruta))
+
+# 2. Predict the test data (OUTPUTS LOG-ODDS) using Boruta logistic regression model
+ranking_lrtest <- predict(lrfit_boruta, newdata = test_boruta)
+
+# 3. Ensure numeric vector (no weird attributes)
+ranking_lrtest <- as.numeric(ranking_lrtest)
+
+# 4. Write the classification predictions to CSV
+write.table(ranking_lrtest, file = "classification.csv", row.names = FALSE, col.names = FALSE)
+```
+\tiny
+```{r}
+features <- matrix(0, nrow = ncol(train), ncol = 1)
+rownames(features) <- colnames(train)
+
+# Set Boruta-selected features to 1
+features[selected_features_boruta, 1] <- 1
+
+# Write the feature selection file
+write.table(features, file = "selection.csv", row.names = FALSE, col.names = FALSE)
+```
+\tiny
+```{r}
+# Zip up the files for Codabench submission
+
+# Get current time for file naming
+time <- format(Sys.time(), "%H%M%S")
+
+# Create the zip file
+system(paste0("zip -u LGBorutaEntry1_", time, ".csv.zip classification.csv"))
+system(paste0("zip -u LGBorutaEntry1_", time, ".csv.zip selection.csv"))
+
+# Display the name of the zip file created
+paste0("The name of your entry file: LGBorutaEntry1_", time, ".csv.zip")
+```
+
+My challenge ID is shaha12 with an AUC score of 0.9143 for prediction and balanced accuracy 0.5992 for feature selection.
+
+# Conclusion
+In this project, I tested several classification and feature selection methods to figure out what worked best for predicting biodegradability. Both Logistic Regression and LDA performed well using all 168 features, but LDA showed better generalization and less overfitting. For feature selection, Lasso gave a very compact model with just 17 features and still solid performance, while Boruta picked 40 features and consistently gave the highest AUC values. For the challenge submission, I went with Logistic Regression and Boruta since it gave the best validation AUC (0.955) and also performed well on the test set (AUC 0.914). But if this were for real-world use, I’d probably recommend LDA with Boruta—it kept a strong AUC (0.947) and the best balanced accuracy (0.844), which is important when you care about both classes equally.For ChemsRUs, I’d suggest focusing R&D efforts on the top Boruta-selected features—especially those with importance scores above 40. These likely represent the most meaningful chemical properties for improving biodegradability. It could also be helpful to build a scoring system based on these features and figure out which ones are actually modifiable through synthesis.For future work, exploring non-linear models like random forests or gradient boosting, especially to capture interactions between important features could be interesting. More training data would also help with validation and generalization.
